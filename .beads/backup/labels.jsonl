@@ -95,8 +95,7 @@
 {"issue_id":"gt-j30x","label":"result:success"}
 {"issue_id":"gt-j30x","label":"rig:gastown"}
 {"issue_id":"gt-j30x","label":"type:plugin-run"}
-{"issue_id":"gt-j3cx","label":"backoff-until:1772723477"}
-{"issue_id":"gt-j3cx","label":"idle:2"}
+{"issue_id":"gt-j3cx","label":"idle:3"}
 {"issue_id":"gt-l5js","label":"bug"}
 {"issue_id":"gt-l5js","label":"p1"}
 {"issue_id":"gt-l7uq","label":"zfc-violation"}
