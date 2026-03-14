@@ -1349,6 +1349,12 @@ func Start(townRoot string) error {
 		return fmt.Errorf("opening log file: %w", err)
 	}
 
+	// Remove stale Unix socket left behind by a previous Dolt crash.
+	// Dolt creates /tmp/mysql.sock by default; if not cleaned up, the
+	// next start emits "unix socket set up failed: file already in use"
+	// and falls back to TCP-only. (GH#2687)
+	cleanStaleDoltSocket()
+
 	// Validate port is available before starting (catches multi-town port conflicts)
 	if err := checkPortAvailable(config.Port); err != nil {
 		logFile.Close()
@@ -1465,6 +1471,35 @@ func cleanupStaleDoltLock(databaseDir string) error {
 	// lsof found processes - lock is legitimately held (likely by bd)
 	// This is not an error condition; dolt server will handle the conflict
 	return nil
+}
+
+// DefaultDoltSocketPath is the default Unix socket Dolt creates.
+const DefaultDoltSocketPath = "/tmp/mysql.sock"
+
+// cleanStaleDoltSocket removes the default Unix socket file that Dolt creates
+// at /tmp/mysql.sock. After a crash, this file lingers and prevents the next
+// server start from binding the Unix socket, causing a warning and TCP-only
+// fallback.
+func cleanStaleDoltSocket() {
+	cleanStaleSocket(DefaultDoltSocketPath)
+}
+
+// cleanStaleSocket removes a Unix socket file if it exists and no process
+// currently holds it open.
+func cleanStaleSocket(socketPath string) {
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		return
+	}
+
+	// Check if any process holds the socket open
+	cmd := exec.Command("lsof", socketPath)
+	if err := cmd.Run(); err != nil {
+		// lsof exit code 1 = no process holds it → stale, safe to remove
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			_ = os.Remove(socketPath)
+		}
+	}
+	// If lsof succeeds (exit 0), a process is using it — leave it alone.
 }
 
 // Stop stops the Dolt SQL server.

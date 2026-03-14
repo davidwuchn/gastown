@@ -3953,3 +3953,27 @@ func TestEnsureAllMetadata_FallbackToDbName(t *testing.T) {
 		t.Error("metadata.json should exist for unknown rig")
 	}
 }
+
+func TestCleanStaleSocket_RemovesStaleFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix sockets not applicable on Windows")
+	}
+
+	// Create a regular file pretending to be a stale socket
+	socketPath := filepath.Join(t.TempDir(), "mysql.sock")
+	if err := os.WriteFile(socketPath, []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanStaleSocket(socketPath)
+
+	// lsof will report exit code 1 (no process holds it) → file should be removed
+	if _, err := os.Stat(socketPath); !os.IsNotExist(err) {
+		t.Error("stale socket file should have been removed")
+	}
+}
+
+func TestCleanStaleSocket_NoopWhenMissing(t *testing.T) {
+	// Should not panic or error when socket doesn't exist
+	cleanStaleSocket(filepath.Join(t.TempDir(), "nonexistent.sock"))
+}
