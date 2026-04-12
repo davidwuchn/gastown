@@ -1200,6 +1200,21 @@ func (d *Daemon) ensureBootRunning() {
 		return
 	}
 
+	// Idle guard: skip if Deacon is healthy AND no beads are actively in flight.
+	//
+	// Boot's job is to triage a stuck or unresponsive Deacon and to flag stuck
+	// in_progress/hooked work. If Deacon has written a fresh heartbeat and no
+	// beads are in_progress or hooked, there is nothing to triage.
+	//
+	// We deliberately do NOT update bootLastSpawned on an idle skip: the cooldown
+	// is about rate-limiting real spawns; the idle check should re-run every
+	// heartbeat so Boot fires promptly when work actually appears.
+	hb := deacon.ReadHeartbeat(d.config.TownRoot)
+	if hb != nil && hb.IsFresh() && !d.hasActiveWork() {
+		d.logger.Println("Boot spawn skipped: Deacon is healthy and no active work in flight")
+		return
+	}
+
 	b := boot.New(d.config.TownRoot)
 
 	// Check for degraded mode
@@ -1242,6 +1257,39 @@ func (d *Daemon) ensureBootRunning() {
 
 	d.bootLastSpawned = time.Now()
 	d.logger.Println("Boot spawned successfully")
+}
+
+// hasActiveWork returns true if any bead store has in_progress or hooked beads.
+// These are the only states Boot can meaningfully act on: in_progress work may be
+// stuck, and hooked work is waiting on a polecat that may have died.
+//
+// Returns true conservatively on error or when no stores are available, so the
+// caller falls through to spawn Boot rather than suppressing it incorrectly.
+func (d *Daemon) hasActiveWork() bool {
+	if len(d.beadsStores) == 0 {
+		// No stores open — cannot inspect; let Boot run to be safe.
+		return true
+	}
+
+	ctx, cancel := context.WithTimeout(d.ctx, 5*time.Second)
+	defer cancel()
+
+	for name, store := range d.beadsStores {
+		for _, rawStatus := range []string{"in_progress"} {
+			s := beadsdk.Status(rawStatus)
+			filter := beadsdk.IssueFilter{Status: &s, Limit: 1}
+			issues, err := store.SearchIssues(ctx, "", filter)
+			if err != nil {
+				d.logger.Printf("hasActiveWork: %s/%s query failed: %v — assuming work present",
+					name, rawStatus, err)
+				return true // conservative: don't suppress Boot on query failure
+			}
+			if len(issues) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // runDegradedBootTriage performs mechanical Boot logic without AI reasoning.
@@ -1428,7 +1476,22 @@ func (d *Daemon) checkDeaconHeartbeat() {
 		d.logger.Printf("STUCK DEACON: heartbeat stale for %s, session %s needs restart", age.Round(time.Minute), sessionName)
 		d.restartStuckDeacon(sessionName, fmt.Sprintf("heartbeat stale for %s", age.Round(time.Minute)))
 	} else {
-		// Stale but not very stale (5-20 min) - nudge to wake up
+		// Stale but not very stale (5-20 min) - nudge to wake up (unless idle).
+		//
+		// Idle guard: skip nudge if no beads are actively in flight.
+		// This mirrors the Boot idle guard (ensureBootRunning). When the Deacon's
+		// heartbeat has gone stale during an await-signal backoff sleep, sending a
+		// nudge interrupts the exponential backoff for no reason — the Deacon will
+		// wake naturally at its next timeout. Only nudge if work is actually in
+		// flight (in_progress or hooked) that the Deacon may need to act on.
+		// Conservative: on store errors hasActiveWork returns true, so nudge fires.
+		// See also: runtime/runtime.go:99-101 — session-started nudge was removed
+		// for the same reason (it interrupted the deacon's await-signal backoff).
+		if !d.hasActiveWork() {
+			d.logger.Println("Deacon nudge skipped: no active work in flight, await-signal will fire naturally")
+			return
+		}
+
 		d.logger.Printf("Deacon stuck for %s - nudging session", age.Round(time.Minute))
 		if err := d.tmux.NudgeSession(sessionName, "HEALTH_CHECK: heartbeat stale, respond to confirm responsiveness"); err != nil {
 			d.logger.Printf("Error nudging stuck Deacon: %v", err)
